@@ -1,17 +1,23 @@
 package com.Project.searchEngine.service;
 
+import com.Project.searchEngine.model.ProductSearchDocument;
+import com.Project.searchEngine.model.ProductSearchDocument.ProductVariant;
+import com.Project.searchEngine.repo.ProductSearchRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.stereotype.Service;
 import org.springframework.messaging.handler.annotation.Payload;
+import org.springframework.stereotype.Service;
+import java.util.ArrayList;
+import java.util.List;
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ProductEventConsumer {
     private final ObjectMapper objectMapper;
+    private final ProductSearchRepository searchRepository; // 1. Inject the ES Repository
     @KafkaListener(topics = "ecommerce.ecommerce_search.products", groupId = "elasticsearch-indexer-group")
     public void consumeForElasticsearch(@Payload(required = false) String rawMessage) {
         if (rawMessage == null){
@@ -22,6 +28,33 @@ public class ProductEventConsumer {
             String operation = extractOperation(rootNode);
             if (operation.equals("c") || operation.equals("u")) {
                 log.info("[ELASTICSEARCH] Indexing document...");
+                JsonNode payloadNode = rootNode.path("payload");
+                JsonNode afterNode = payloadNode.path("after");
+                if (afterNode.isMissingNode()) {
+                    afterNode = rootNode.path("after");
+                }
+                if (!afterNode.isMissingNode() && !afterNode.isNull()) {
+                    JsonNode documentNode = objectMapper.readTree(afterNode.asText());
+                    String id = documentNode.path("_id").path("$oid").asText();
+                    String name = documentNode.path("name").asText();
+                    String description = documentNode.path("description").asText();
+                    List<ProductVariant> variantList = new ArrayList<>();
+                    JsonNode variantsNode = documentNode.path("variants");
+                    if (variantsNode.isArray()) {
+                        for (JsonNode variant : variantsNode) {
+                            String sku = variant.path("sku").asText();
+                            String size = variant.path("size").asText();
+                            String color = variant.path("color").asText();
+                            Double price = variant.path("price").path("$numberDecimal").asDouble(0.0);
+                            Integer stockQuantity = variant.path("inventoryCount").asInt(0);
+                            variantList.add(new ProductVariant(sku, size, color, price, stockQuantity));
+                        }
+                    }
+                    ProductSearchDocument product = new ProductSearchDocument(id, name, description, variantList);
+                    searchRepository.save(product);
+                    log.info("[ELASTICSEARCH] Successfully saved product ID: {} to search index", id);
+                }
+
             } else if (operation.equals("d")) {
                 log.info("[ELASTICSEARCH] Removing document from index...");
             }
