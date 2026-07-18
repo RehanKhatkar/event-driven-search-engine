@@ -38,6 +38,14 @@ public class ProductEventConsumer {
                     String id = documentNode.path("_id").path("$oid").asText();
                     String name = documentNode.path("name").asText();
                     String description = documentNode.path("description").asText();
+                    String category = documentNode.path("category").asText(null);
+                    List<String> tags = new ArrayList<>();
+                    JsonNode tagsNode = documentNode.path("tags");
+                    if (tagsNode.isArray()) {
+                        for (JsonNode tag : tagsNode) {
+                            tags.add(tag.asText());
+                        }
+                    }
                     List<ProductVariant> variantList = new ArrayList<>();
                     JsonNode variantsNode = documentNode.path("variants");
                     if (variantsNode.isArray()) {
@@ -50,7 +58,7 @@ public class ProductEventConsumer {
                             variantList.add(new ProductVariant(sku, size, color, price, stockQuantity));
                         }
                     }
-                    ProductSearchDocument product = new ProductSearchDocument(id, name, description, variantList);
+                    ProductSearchDocument product = new ProductSearchDocument(id, name, description, category, tags, variantList);
                     searchRepository.save(product);
                     log.info("[ELASTICSEARCH] Successfully saved product ID: {} to search index", id);
                 }
@@ -62,9 +70,7 @@ public class ProductEventConsumer {
             log.error("[ELASTICSEARCH] Failed to process event", e);
         }
     }
-    @KafkaListener(topics = "ecommerce.ecommerce_search.products",
-            groupId = "redis-cache-invalidator-group",
-            concurrency = "3")
+    @KafkaListener(topics = "ecommerce.ecommerce_search.products", groupId = "redis-cache-invalidator-group", concurrency = "3")
     public void consumeForRedis(@Payload(required = false) String rawMessage) {
         if (rawMessage == null) {
             return; // Ignore tombstones

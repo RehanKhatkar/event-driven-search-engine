@@ -21,6 +21,10 @@ public class ProductSearchDocument {
     private String name;
     @Field(type = FieldType.Text)
     private String description;
+    @Field(type = FieldType.Keyword)
+    private String category;
+    @Field(type = FieldType.Keyword)
+    private List<String> tags;
     @Field(type = FieldType.Nested)
     private List<ProductVariant> variants;
     @Data
