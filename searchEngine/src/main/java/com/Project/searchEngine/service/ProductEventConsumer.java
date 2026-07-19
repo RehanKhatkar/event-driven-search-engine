@@ -1,7 +1,9 @@
 package com.Project.searchEngine.service;
 
+import com.Project.searchEngine.model.FailedEvent;
 import com.Project.searchEngine.model.ProductSearchDocument;
 import com.Project.searchEngine.model.ProductSearchDocument.ProductVariant;
+import com.Project.searchEngine.repo.FailedEventRepository;
 import com.Project.searchEngine.repo.ProductSearchRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -9,6 +11,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.annotation.RetryableTopic;
+import org.springframework.kafka.retrytopic.TopicSuffixingStrategy;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Service;
 import java.util.ArrayList;
@@ -20,6 +24,8 @@ public class ProductEventConsumer {
     private final ObjectMapper objectMapper;
     private final ProductSearchRepository searchRepository;
     private final StringRedisTemplate redisTemplate;
+    private final FailedEventRepository failedEventRepository;
+    @RetryableTopic(attempts = "4", autoCreateTopics = "true", topicSuffixingStrategy = TopicSuffixingStrategy.SUFFIX_WITH_INDEX_VALUE)
     @KafkaListener(topics = "ecommerce.ecommerce_search.products", groupId = "elasticsearch-indexer-group")
     public void consumeForElasticsearch(@Payload(required = false) String rawMessage) {
         if (rawMessage == null){
@@ -37,7 +43,7 @@ public class ProductEventConsumer {
                 }
                 if (!afterNode.isMissingNode() && !afterNode.isNull()) {
                     JsonNode documentNode = objectMapper.readTree(afterNode.asText());
-                    String id = documentNode.path("_id").path("$oid").asText();
+                    String id = extractIdFromPayload(payloadNode, operation);
                     String name = documentNode.path("name").asText();
                     String description = documentNode.path("description").asText();
                     String category = documentNode.path("category").asText(null);
@@ -64,12 +70,18 @@ public class ProductEventConsumer {
                     searchRepository.save(product);
                     log.info("[ELASTICSEARCH] Successfully saved product ID: {} to search index", id);
                 }
-
             } else if (operation.equals("d")) {
                 log.info("[ELASTICSEARCH] Removing document from index...");
+                JsonNode payloadNode = rootNode.path("payload");
+                String id = extractIdFromPayload(payloadNode, operation);
+                if (id != null) {
+                    searchRepository.deleteById(id);
+                    log.info("[ELASTICSEARCH] Successfully deleted product ID: {}", id);
+                }
             }
         } catch (Exception e) {
-            log.error("[ELASTICSEARCH] Failed to process event", e);
+            log.warn("[ELASTICSEARCH] Failed to process event. Triggering retry mechanism...");
+            throw new RuntimeException("Elasticsearch processing failed", e);
         }
     }
     @KafkaListener(topics = "ecommerce.ecommerce_search.products", groupId = "redis-cache-invalidator-group", concurrency = "3")
@@ -117,5 +129,25 @@ public class ProductEventConsumer {
             return idNode.has("$oid") ? idNode.path("$oid").asText() : idNode.asText();
         }
         return null;
+    }
+    @org.springframework.kafka.annotation.DltHandler
+    public void processDltMessage(
+            @org.springframework.messaging.handler.annotation.Payload String rawMessage,
+            @org.springframework.messaging.handler.annotation.Header(
+                    name = org.springframework.kafka.support.KafkaHeaders.ORIGINAL_TOPIC,
+                    required = false) String topic,
+            @org.springframework.messaging.handler.annotation.Header(
+                    name = org.springframework.kafka.support.KafkaHeaders.EXCEPTION_MESSAGE,
+                    required = false) String errorMessage) {
+        log.error("[DLQ] Max retries reached. Saving failed event to MongoDB.");
+        String safeTopic = (topic != null) ? topic : "unknown-topic";
+        String safeError = (errorMessage != null) ? errorMessage : "Unknown error occurred";
+        try {
+            FailedEvent failedEvent = new FailedEvent(null, safeTopic, rawMessage, safeError, java.time.LocalDateTime.now());
+            failedEventRepository.save(failedEvent);
+            log.info("[DLQ] Successfully persisted failed event to 'failed_kafka_events' collection.");
+        } catch (Exception e) {
+            log.error("[DLQ-FATAL] Could not save to MongoDB! Data: {}", rawMessage, e);
+        }
     }
 }
