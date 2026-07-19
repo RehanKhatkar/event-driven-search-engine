@@ -13,6 +13,8 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.annotation.RetryableTopic;
 import org.springframework.kafka.retrytopic.TopicSuffixingStrategy;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Service;
 import java.util.ArrayList;
@@ -27,13 +29,14 @@ public class ProductEventConsumer {
     private final FailedEventRepository failedEventRepository;
     @RetryableTopic(attempts = "4", autoCreateTopics = "true", topicSuffixingStrategy = TopicSuffixingStrategy.SUFFIX_WITH_INDEX_VALUE)
     @KafkaListener(topics = "ecommerce.ecommerce_search.products", groupId = "elasticsearch-indexer-group")
-    public void consumeForElasticsearch(@Payload(required = false) String rawMessage) {
+    public void consumeForElasticsearch(@Payload(required = false) String rawMessage, @Header(name = KafkaHeaders.RECEIVED_KEY, required = false) String messageKey) {
         if (rawMessage == null){
             return; // Ignore tombstones
         }
         try {
             JsonNode rootNode = objectMapper.readTree(rawMessage);
             String operation = extractOperation(rootNode);
+            String documentId = extractIdFromKey(messageKey);
             if (operation.equals("c") || operation.equals("u")) {
                 log.info("[ELASTICSEARCH] Indexing document...");
                 JsonNode payloadNode = rootNode.path("payload");
@@ -41,9 +44,8 @@ public class ProductEventConsumer {
                 if (afterNode.isMissingNode()) {
                     afterNode = rootNode.path("after");
                 }
-                if (!afterNode.isMissingNode() && !afterNode.isNull()) {
+                if (!afterNode.isMissingNode() && !afterNode.isNull() && documentId != null) {
                     JsonNode documentNode = objectMapper.readTree(afterNode.asText());
-                    String id = extractIdFromPayload(payloadNode, operation);
                     String name = documentNode.path("name").asText();
                     String description = documentNode.path("description").asText();
                     String category = documentNode.path("category").asText(null);
@@ -66,17 +68,17 @@ public class ProductEventConsumer {
                             variantList.add(new ProductVariant(sku, size, color, price, stockQuantity));
                         }
                     }
-                    ProductSearchDocument product = new ProductSearchDocument(id, name, description, category, tags, variantList);
+                    ProductSearchDocument product = new ProductSearchDocument(documentId, name, description, category, tags, variantList);
                     searchRepository.save(product);
-                    log.info("[ELASTICSEARCH] Successfully saved product ID: {} to search index", id);
+                    log.info("[ELASTICSEARCH] Successfully saved product ID: {} to search index", documentId);
                 }
             } else if (operation.equals("d")) {
                 log.info("[ELASTICSEARCH] Removing document from index...");
-                JsonNode payloadNode = rootNode.path("payload");
-                String id = extractIdFromPayload(payloadNode, operation);
-                if (id != null) {
-                    searchRepository.deleteById(id);
-                    log.info("[ELASTICSEARCH] Successfully deleted product ID: {}", id);
+                if (documentId != null && !documentId.isEmpty()) {
+                    searchRepository.deleteById(documentId);
+                    log.info("[ELASTICSEARCH] Successfully deleted product ID: {}", documentId);
+                } else {
+                    log.error("[ELASTICSEARCH-FATAL] Failed to extract ID from Kafka Key during delete! Key: {}", messageKey);
                 }
             }
         } catch (Exception e) {
@@ -118,15 +120,47 @@ public class ProductEventConsumer {
         }
         return operation;
     }
+    private String extractIdFromKey(String messageKey) throws Exception {
+        if (messageKey == null){
+            return null;
+        }
+        JsonNode keyNode = objectMapper.readTree(messageKey);
+        JsonNode payloadNode = keyNode.path("payload");
+        String idString = payloadNode.isMissingNode() ? keyNode.path("id").asText() : payloadNode.path("id").asText();
+        if (idString != null && !idString.isEmpty()) {
+            if (idString.startsWith("{")) {
+                JsonNode idObj = objectMapper.readTree(idString);
+                if (idObj.has("$oid")) {
+                    return idObj.path("$oid").asText();
+                } else if (idObj.has("_id") && idObj.path("_id").has("$oid")) {
+                    return idObj.path("_id").path("$oid").asText();
+                }
+            }
+            return idString.replace("\"", "");
+        }
+        return null;
+    }
     private String extractIdFromPayload(JsonNode payloadNode, String operation) throws Exception {
-        JsonNode targetStateNode = operation.equals("u") ? payloadNode.path("after") : payloadNode.path("before");
-        if (targetStateNode.isMissingNode() || targetStateNode.isNull()) {
-            targetStateNode = payloadNode.path("documentKey");
+        JsonNode targetStateNode = payloadNode.path("documentKey");
+        if (operation.equals("c") || operation.equals("u")) {
+            targetStateNode = payloadNode.path("after");
         }
         if (!targetStateNode.isMissingNode() && !targetStateNode.isNull()) {
-            JsonNode documentNode = objectMapper.readTree(targetStateNode.asText());
+            JsonNode documentNode;
+            if (targetStateNode.isTextual()) {
+                documentNode = objectMapper.readTree(targetStateNode.asText());
+            } else {
+                documentNode = targetStateNode;
+            }
             JsonNode idNode = documentNode.path("_id");
-            return idNode.has("$oid") ? idNode.path("$oid").asText() : idNode.asText();
+            if (idNode.isMissingNode() && operation.equals("d")) {
+                idNode = documentNode;
+            }
+            if (idNode.has("$oid")) {
+                return idNode.path("$oid").asText();
+            } else if (idNode.isTextual()) {
+                return idNode.asText();
+            }
         }
         return null;
     }

@@ -68,7 +68,7 @@ services:
     ports:
       - "6379:6379"
     restart: unless-stopped
-    command: redis-server --save 60 1 --loglevel warning
+    command: redis-server --save 60 1 --loglevel warning --maxmemory 1gb --maxmemory-policy allkeys-lfu
 volumes:
   mongo_data:
   kafka_data_v2:
