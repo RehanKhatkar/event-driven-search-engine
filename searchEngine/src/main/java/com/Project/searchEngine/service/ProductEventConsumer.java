@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Service;
@@ -17,7 +18,8 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ProductEventConsumer {
     private final ObjectMapper objectMapper;
-    private final ProductSearchRepository searchRepository; // 1. Inject the ES Repository
+    private final ProductSearchRepository searchRepository;
+    private final StringRedisTemplate redisTemplate;
     @KafkaListener(topics = "ecommerce.ecommerce_search.products", groupId = "elasticsearch-indexer-group")
     public void consumeForElasticsearch(@Payload(required = false) String rawMessage) {
         if (rawMessage == null){
@@ -79,12 +81,22 @@ public class ProductEventConsumer {
             JsonNode rootNode = objectMapper.readTree(rawMessage);
             String operation = extractOperation(rootNode);
             if (operation.equals("u") || operation.equals("d")) {
-                log.info("[REDIS THREAD - {}] Evicting stale cache data...", Thread.currentThread().getName());
+                JsonNode payloadNode = rootNode.path("payload");
+                String documentId = extractIdFromPayload(payloadNode, operation);
+                if (documentId != null && !documentId.isEmpty()) {
+                    String redisKey = "product:id:" + documentId;
+                    Boolean wasDeleted = redisTemplate.delete(redisKey);
+                    if (Boolean.TRUE.equals(wasDeleted)) {
+                        log.info("[REDIS THREAD - {}] Successfully evicted stale key: {}", Thread.currentThread().getName(), redisKey);
+                    } else {
+                        log.debug("[REDIS THREAD - {}] Key {} was not in cache (already evicted or never cached).", Thread.currentThread().getName(), redisKey);
+                    }
+                }
             } else if (operation.equals("c")) {
                 log.debug("[REDIS] Ignoring create event.");
             }
         } catch (Exception e) {
-            log.error("[REDIS] Failed to process event", e);
+            log.error("[REDIS] Failed to process event for cache eviction", e);
         }
     }
     private String extractOperation(JsonNode rootNode) {
@@ -93,5 +105,17 @@ public class ProductEventConsumer {
             operation = rootNode.path("op").asText("");
         }
         return operation;
+    }
+    private String extractIdFromPayload(JsonNode payloadNode, String operation) throws Exception {
+        JsonNode targetStateNode = operation.equals("u") ? payloadNode.path("after") : payloadNode.path("before");
+        if (targetStateNode.isMissingNode() || targetStateNode.isNull()) {
+            targetStateNode = payloadNode.path("documentKey");
+        }
+        if (!targetStateNode.isMissingNode() && !targetStateNode.isNull()) {
+            JsonNode documentNode = objectMapper.readTree(targetStateNode.asText());
+            JsonNode idNode = documentNode.path("_id");
+            return idNode.has("$oid") ? idNode.path("$oid").asText() : idNode.asText();
+        }
+        return null;
     }
 }
