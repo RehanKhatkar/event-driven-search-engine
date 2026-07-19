@@ -16,8 +16,6 @@ public class ProductController {
     private final ProductQueryService queryService;
     @GetMapping("/{id}")
     public ResponseEntity<ProductSearchDocument> getProduct(@PathVariable String id) {
-        return queryService.getProductById(id)
-                .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
+        return ResponseEntity.ok(queryService.getProductById(id));
     }
 }

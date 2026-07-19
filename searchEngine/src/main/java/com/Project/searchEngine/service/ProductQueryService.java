@@ -5,12 +5,12 @@ import com.Project.searchEngine.repo.ProductSearchRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.QueryTimeoutException;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
-import java.util.Optional;
-
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -18,27 +18,27 @@ public class ProductQueryService {
     private final ProductSearchRepository searchRepository;
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
-    public Optional<ProductSearchDocument> getProductById(String id) {
+    public ProductSearchDocument getProductById(String id) {
         String redisKey = "product:id:" + id;
-        try{
+        try {
             String cachedProduct = redisTemplate.opsForValue().get(redisKey);
             if (cachedProduct != null) {
-                log.info("[REDIS] Cache HIT for product: {}", id);
-                return Optional.of(objectMapper.readValue(cachedProduct, ProductSearchDocument.class));
+                log.debug("[REDIS] Cache hit for product {}", id);
+                return objectMapper.readValue(cachedProduct, ProductSearchDocument.class);
             }
-        }catch (Exception e){
-            log.error("[REDIS] Failed to read from cache, falling back to database", e);
+        } catch (RedisConnectionFailureException | QueryTimeoutException e) {
+            log.warn("[REDIS-DOWN] Cache unreachable, falling back to Elasticsearch for product {}", id);
+        } catch (Exception e) {
+            log.warn("[REDIS-ERROR] Unexpected cache error, falling back to Elasticsearch", e);
         }
-        log.info("[REDIS] Cache MISS for product: {}. Fetching from Elasticsearch...", id);
-        Optional<ProductSearchDocument> productOpt = searchRepository.findById(id);
-        productOpt.ifPresent(product -> {
-            try {
-                String jsonProduct = objectMapper.writeValueAsString(product);
-                redisTemplate.opsForValue().set(redisKey, jsonProduct, Duration.ofHours(2));
-            } catch (Exception e) {
-                log.error("[REDIS] Failed to write to cache", e);
-            }
-        });
-        return productOpt;
+        log.debug("[ELASTICSEARCH] Querying primary search index for product {}", id);
+        ProductSearchDocument product = searchRepository.findById(id).orElseThrow(() -> new RuntimeException("Product not found"));
+        try {
+            String productJson = objectMapper.writeValueAsString(product);
+            redisTemplate.opsForValue().set(redisKey, productJson, Duration.ofMinutes(30));
+        } catch (Exception e) {
+            log.warn("[REDIS-DOWN] Could not save to cache, but returning data to user anyway.");
+        }
+        return product;
     }
 }
