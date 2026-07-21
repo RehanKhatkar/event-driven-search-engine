@@ -83,6 +83,8 @@ services:
       context: ./searchEngine
     deploy:
       replicas: 2
+    environment:
+      - MANAGEMENT_METRICS_TAGS_APPLICATION=searchEngine
     entrypoint:
       - "java"
       - "-jar"
@@ -129,7 +131,11 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     depends_on:
       - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+
 volumes:
   mongo_data:
   kafka_data_v2:
   es_data_v9:
+  grafana_data:
