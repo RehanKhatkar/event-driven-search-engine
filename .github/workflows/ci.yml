@@ -16,6 +16,7 @@ jobs:
           cache: maven
       - name: Build with Maven
         run: mvn clean package -DskipTests
+        working-directory: ./searchEngine
       - name: Log in to Docker Hub
         if: github.event_name == 'push'
         uses: docker/login-action@v3
@@ -26,6 +27,6 @@ jobs:
         if: github.event_name == 'push'
         uses: docker/build-push-action@v5
         with:
-          context: .
+          context: ./searchEngine
           push: true
           tags: rehankhatkar/search-engine-backend:latest
