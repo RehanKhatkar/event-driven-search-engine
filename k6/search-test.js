@@ -1,19 +1,26 @@
 import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { check } from 'k6';
+import { SharedArray } from 'k6/data';
+
 export const options = {
     stages: [
-        { duration: '30s', target: 20 },
-        { duration: '1m', target: 50 },
+        { duration: '30s', target: 200 },
+        { duration: '2m', target: 500 },
         { duration: '30s', target: 0 },
     ],
 };
-const searchTerms = ['Wireless', 'Pro', 'Ergonomic', 'Smart', 'Leather', 'Portable', 'Books'];
+const searchTerms = [
+    'wireless', 'bluetooth', 'monitor', 'laptop', 'keyboard',
+'mouse', 'cable', 'gaming', 'desk', 'chair', 'usb', 'smart'
+];
+function getRandomTerm() {
+    return searchTerms[Math.floor(Math.random() * searchTerms.length)];
+}
 export default function () {
-    const term = searchTerms[Math.floor(Math.random() * searchTerms.length)];
-    const res = http.get(`http://localhost:8080/api/products/search?q=${term}`);
+    const term = getRandomTerm();
+    const res = http.get(`http://localhost/api/products/search?q=${term}`);
     check(res, {
-        'search status is 200': (r) => r.status === 200,
-          'search latency < 200ms': (r) => r.timings.duration < 200,
+        'status is 200': (r) => r.status === 200,
+        'response time < 100ms': (r) => r.timings.duration < 100,
     });
-    sleep(0.1);
 }
