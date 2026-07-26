@@ -47,10 +47,14 @@ flowchart LR
     SB1 -->|Search| ES
     SB2 -->|Search| ES
 
-    Mongo --> Debezium
+        Mongo --> Debezium
     Debezium --> Kafka
     Kafka --> Listener
-    Listener --> ES
+
+    Listener -->|Success| ES
+    Listener -->|Failure| Retry[Retry x3<br/>Fixed Delay]
+    Retry -->|Success| ES
+    Retry -->|Exhausted| DLQ[(Dead Letter Queue)]
 
     %% Styles
     classDef app fill:#EEF5FF,stroke:#2563EB,stroke-width:2px,color:#000000;
@@ -63,7 +67,7 @@ flowchart LR
 ```
 ## Write Path (MongoDB → Elasticsearch Synchronization)
 
-The system follows an event-driven write pipeline. Product updates are written only to **MongoDB**, while **Debezium** captures database changes from the MongoDB Oplog and publishes them to **Apache Kafka**. Spring Boot Kafka listeners consume these events and synchronize the search index in **Elasticsearch**, keeping search data up to date without tightly coupling the application to Elasticsearch.
+The system follows an event-driven write pipeline. Product updates are written only to **MongoDB**, while **Debezium** captures database changes from the MongoDB Oplog and publishes them to **Apache Kafka**. Spring Boot Kafka listeners consume these events and attempt to synchronize the search index in Elasticsearch. If indexing fails because Elasticsearch is temporarily unavailable, the listener retries the operation three times using a fixed-delay retry policy. Events that still cannot be processed are published to a Dead Letter Queue (DLQ) for later inspection and replay, preventing message loss while allowing the consumer to continue processing subsequent events.
 
 ```mermaid
 flowchart LR
@@ -74,21 +78,27 @@ flowchart LR
     E[Apache Kafka]
     F[Spring Kafka Listener]
     G[(Elasticsearch)]
+    H[Retry x3<br/>Fixed Delay]
+    I[(Dead Letter Queue)]
 
     A --> B
     B --> C
     C --> D
     D --> E
     E --> F
-    F --> G
+
+    F -->|Success| G
+    F -->|Failure| H
+    H -->|Success| G
+    H -->|Exhausted| I
 
     classDef app fill:#EEF5FF,stroke:#2563EB,stroke-width:2px,color:#000000;
     classDef db fill:#ECFDF5,stroke:#16A34A,stroke-width:2px,color:#000000;
     classDef infra fill:#FFF7ED,stroke:#EA580C,stroke-width:2px,color:#000000;
 
     class A,F app;
-    class B,G db;
-    class C,D,E infra;
+    class B,G,I db;
+    class C,D,E,H infra;
 ```
 ## Data Consistency Model
 
@@ -100,6 +110,7 @@ This project follows an **eventually consistent** architecture.
 - During this synchronization window, recently modified products may be visible through direct ID lookups before appearing in full-text search results.
 
 This design prioritizes **high throughput**, **service decoupling**, and **independent scalability** over immediate consistency, making it well suited for read-heavy e-commerce workloads where short synchronization delays are acceptable.
+To improve reliability, the Kafka consumer retries failed Elasticsearch indexing operations **three times with a fixed delay** before giving up. Events that still cannot be indexed are published to a **Dead Letter Queue (DLQ)**, allowing them to be manually inspected or replayed once the underlying issue has been resolved. This ensures failed synchronization events are retained instead of being lost.
 
 ## Fault Tolerance
 
@@ -109,9 +120,20 @@ The architecture is designed to continue serving requests even when individual c
 |------------------|-----------------|
 | **Redis unavailable** | Product ID requests automatically fall back to MongoDB, ensuring data remains accessible. |
 | **Kafka temporarily unavailable** | Database writes continue to succeed in MongoDB. Search index synchronization resumes once Kafka and consumers recover. |
+| **Elasticsearch temporarily unavailable** | The Kafka listener retries failed indexing operations 3 times with a fixed delay. If all retry attempts fail, the event is published to a Dead Letter Queue (DLQ) for manual inspection or replay, preventing message loss. |
 | **Spring Boot instance failure** | NGINX continues routing requests to the remaining healthy application instance. |
 
 By isolating responsibilities across independent services, failures are contained to their respective workloads instead of causing a complete system outage. MongoDB remains the source of truth, while Redis and Elasticsearch act as optimized read layers that can be rebuilt from the primary database.
+
+## Reliability Features
+
+The event processing pipeline is designed to tolerate transient failures while preventing message loss.
+
+- **Asynchronous event processing** using Debezium and Apache Kafka.
+- **Three fixed-delay retry attempts** for transient Elasticsearch indexing failures.
+- **Dead Letter Queue (DLQ)** for events that cannot be processed after all retry attempts.
+- **Manual inspection and replay** of failed events from the DLQ.
+- **MongoDB remains the source of truth**, ensuring product data is never lost even if downstream services are temporarily unavailable.
 
 ## CQRS Design
 
@@ -591,6 +613,7 @@ The current implementation demonstrates a high-performance, event-driven archite
 - **Kafka replication** using multiple brokers to improve fault tolerance.
 - **Automated integration and end-to-end tests** to validate the CDC pipeline and search synchronization.
 - **Blue-green or canary deployments** to extend the existing CI/CD pipeline with zero-downtime deployment strategies.
+- **Automated DLQ replay mechanism** to reprocess failed indexing events after Elasticsearch becomes available, reducing the need for manual intervention.
 
 ## Author
 
